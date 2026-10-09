@@ -1,14 +1,14 @@
 {
-    "name": "pzem-telemetry-backend",
+    "name": "gridpulse-backend",
     "version": "1.0.0",
-    "description": "MQTT → PostgreSQL → Socket.io pipeline for PZEM-004T energy telemetry.",
+    "description": "GridPulse ingestion service: MQTT/TLS to PostgreSQL to Socket.io for ESP32 energy-metering nodes.",
     "main": "server.js",
     "scripts": {
         "start": "node server.js",
         "dev": "node --watch server.js",
         "seed": "node seed.js",
         "seed:clear": "node seed.js --clear",
-        "db:init": "psql $DATABASE_URL -f schema.sql"
+        "db:init": "docker exec -i gridpulse-pg psql -U postgres -d gridpulse < schema.sql"
     },
     "dependencies": {
         "cors": "^2.8.5",

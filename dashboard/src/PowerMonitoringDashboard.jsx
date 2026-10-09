@@ -90,7 +90,7 @@ function exportHistoryToCSV(history) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "pzem_telemetry_export.csv";
+  a.download = "gridpulse_export.csv";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1075,7 +1075,7 @@ export default function PowerMonitoringDashboard() {
                   PZEM-004T // v3.0 // MODBUS-RTU
                 </div>
                 <div className="text-base font-mono font-medium text-slate-100 tracking-[0.15em]">
-                  POWER TELEMETRY CONSOLE
+                  GRIDPULSE · POWER TELEMETRY
                 </div>
               </div>
             </div>
@@ -1121,7 +1121,7 @@ export default function PowerMonitoringDashboard() {
                 if (ok) {
                   pushLog(
                     "INFO",
-                    `Exported ${history.length} samples to pzem_telemetry_export.csv`
+                    `Exported ${history.length} samples to gridpulse_export.csv`
                   );
                 } else {
                   pushLog("WARN", "Export aborted — history buffer is empty");
@@ -1180,7 +1180,7 @@ export default function PowerMonitoringDashboard() {
             INTERVAL: 10.00s
           </span>
           <span className="ml-auto hidden md:inline">
-            TOPIC: esp32/pzem/telemetry
+            TOPIC: pzem/device01/telemetry
           </span>
         </div>
       </header>
@@ -1955,7 +1955,7 @@ export default function PowerMonitoringDashboard() {
         {/* ============== FOOTER ============== */}
         <footer className="pt-4 pb-2 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-3 text-[10px] font-mono tracking-[0.2em] text-slate-600">
           <div className="flex items-center gap-4">
-            <span>© PZEM-TELEMETRY-CONSOLE</span>
+            <span>© GRIDPULSE</span>
             <span className="hidden md:inline">
               BUILD 1.0.0 // {new Date().toISOString().split("T")[0]}
             </span>

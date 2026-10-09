@@ -1,408 +1,192 @@
-# PZEM Telemetry Console
+# GridPulse
 
-A real-time, industrial SCADA-style dashboard for monitoring single-phase AC power using a PZEM-004T v3 meter, an ESP32, HiveMQ Cloud, PostgreSQL, and a React frontend — with optional AI-powered operational insights via OpenRouter.
+**End-to-end IoT energy monitoring: from an ESP32 sensor node on the AC mains to a real-time cloud dashboard.**
 
-![stack](https://img.shields.io/badge/stack-ESP32%20%7C%20MQTT%20%7C%20Node-blue)
-![frontend](https://img.shields.io/badge/frontend-React%2019%20%2B%20Vite%20%2B%20Tailwind-0ea5e9)
-![database](https://img.shields.io/badge/db-PostgreSQL%2016-336791)
+GridPulse is a full IoT stack I designed and built: embedded firmware on an ESP32 reads a PZEM-004T power meter over Modbus-RTU and publishes telemetry over MQTT/TLS. A Node.js ingestion service validates each packet, stores it in PostgreSQL and streams it live to a React dashboard over WebSockets. An optional LLM layer reviews the data periodically and flags anomalies.
+
+![ESP32](https://img.shields.io/badge/device-ESP32-E7352C)
+![MQTT](https://img.shields.io/badge/protocol-MQTT%20over%20TLS-660066)
+![Node](https://img.shields.io/badge/backend-Node.js%20%2B%20Express-339933)
+![PostgreSQL](https://img.shields.io/badge/db-PostgreSQL%2016-336791)
+![React](https://img.shields.io/badge/dashboard-React%2019%20%2B%20Vite-0ea5e9)
 
 ---
 
-## What this is
-
-A complete end-to-end pipeline:
+## Architecture
 
 ```
-┌───────────┐   MQTT/TLS    ┌─────────────┐   socket.io   ┌──────────────┐
-│  ESP32 +  │ ────────────► │   Node.js   │ ────────────► │  React SCADA │
-│ PZEM-004T │   (HiveMQ)    │   Backend   │               │   Dashboard  │
-└───────────┘               │  (Express)  │               └──────────────┘
-                            │     │       │
-                            │     ▼       │
-                            │ PostgreSQL  │
-                            │ (Docker)    │
-                            │     │       │
-                            │     ▼       │
-                            │ OpenRouter  │ (optional AI insights)
-                            └─────────────┘
+  EDGE                     CLOUD BROKER            SERVER                          CLIENT
+┌──────────────────┐     ┌──────────────┐     ┌──────────────────────┐      ┌─────────────────┐
+│ PZEM-004T v3     │     │              │     │ Node.js ingestion    │      │ React dashboard │
+│   │ Modbus-RTU   │     │  HiveMQ      │     │  · schema validation │ WS   │  · live KPIs    │
+│   ▼ (UART2)      │MQTT │  Cloud       │MQTT │  · PostgreSQL write  │─────►│  · history      │
+│ ESP32            │────►│  (TLS :8883) │────►│  · Socket.io fan-out │      │  · alarms       │
+│  · WiFi STA      │QoS0 │              │QoS1 │  · REST history API  │      │  · AI insights  │
+│  · JSON @ 10 s   │     └──────────────┘     │  · LLM anomaly check │      └─────────────────┘
+└──────────────────┘                          └──────────┬───────────┘
+                                                         ▼
+                                              PostgreSQL (time-series,
+                                              BRIN + composite index)
 ```
 
-**Features:**
-- Live KPI cards (voltage, current, power, power factor) with conditional formatting
-- Responsive Recharts area chart with 5M / 1H / 24H / 7D historical ranges
-- Server-side downsampling for wide time windows
-- Cumulative energy, mains frequency gauge, event log
-- CSV export of chart buffer
-- Configurable alarm thresholds via in-app modal
-- AI Insights panel — automatic anomaly/trend/efficiency analysis (free-tier OpenRouter)
-- Seed script for visual testing without real hardware
+## What I built at each layer
+
+### 1. Edge device ([`firmware/`](firmware/gridpulse-node))
+- ESP32 talks to a **PZEM-004T v3** energy meter over **Modbus-RTU on UART2** (GPIO 16/17)
+- Samples voltage, current, active power, cumulative energy, mains frequency and power factor
+- Publishes a compact JSON packet every 10 s to an **MQTT broker over TLS (port 8883)**
+- Non-blocking `millis()` scheduler keeps the MQTT keep-alive serviced between samples
+- Recovers on its own after WiFi or broker drop-outs, and discards invalid (`NaN`) sensor reads
+- Credentials sit in a gitignored `secrets.h`, separate from the source
+
+### 2. Messaging
+- HiveMQ Cloud serverless broker, with a per-device client ID and topic (`pzem/<device>/telemetry`)
+- The backend subscribes with **MQTT v5, QoS 1**, a TLS certificate check and automatic reconnect
+
+### 3. Ingestion backend ([`backend/`](backend))
+- Checks the type of every incoming field before storing it. Malformed packets never reach the DB
+- Writes to PostgreSQL and pushes each new reading to all connected dashboards through **Socket.io**
+- `GET /api/history` returns raw samples for short windows. For 24 h and 7 d it **downsamples on the server** with `date_bin()`
+- Database checks (`CHECK` constraints) reject values outside realistic electrical ranges
+- Shuts down gracefully, uses a pooled DB connection, and provides a `/healthz` liveness endpoint
+
+### 4. Data layer ([`backend/schema.sql`](backend/schema.sql))
+- Append-only time-series table with a **BRIN index** on the timestamp (small on disk, fast range scans)
+- A composite `(device_id, created_at DESC)` index serves "latest N readings" queries
+- Notes in the schema cover how to scale to TimescaleDB or monthly partitions later
+
+### 5. Dashboard ([`dashboard/`](dashboard))
+- A control-room-style (SCADA) UI with live KPI cards, a mains frequency gauge and an event log
+- 5M / 1H / 24H / 7D charts built with Recharts, plus CSV export
+- Alarm limits for voltage, current, PF, power spikes and frequency deviation that you can change in the app
+
+### 6. AI insights (optional)
+- Every N minutes, the backend summarises 1 h and 24 h statistics and asks an LLM (via OpenRouter) for anomalies, trends and efficiency tips
+- The model's JSON reply is checked against a fixed structure. One call per cycle is shared by every open dashboard to stay within free-tier limits
+
+---
+
+## Hardware
+
+| Component | Notes |
+|---|---|
+| ESP32 DevKit | Any ESP32 with UART2 |
+| PZEM-004T v3.0 (TTL) | Includes 100 A split-core CT |
+| 5 V supply | Powers the PZEM TTL side |
+
+**Wiring**
+
+| PZEM | ESP32 |
+|---|---|
+| TX | GPIO 16 (RX2) |
+| RX | GPIO 17 (TX2) |
+| 5V | 5V |
+| GND | GND |
+
+> ⚠️ The PZEM's measurement side connects to AC mains. Wire it with power off and keep the CT and voltage terminals enclosed.
+
+Keep UART leads short and add a 100 nF decoupling cap near the TTL header. For long or noisy runs, use the RS-485 PZEM variant with MAX485 transceivers.
 
 ---
 
 ## Repository layout
 
 ```
-pzem-dashboard/
+gridpulse/
+├── firmware/gridpulse-node/
+│   ├── gridpulse-node.ino     # ESP32 firmware (Arduino)
+│   └── secrets.example.h      # copy to secrets.h
 ├── backend/
-│   ├── server.js          # Express + MQTT + Socket.io + AI proxy
-│   ├── schema.sql         # PostgreSQL time-series schema
-│   ├── seed.js            # Synthetic telemetry generator (7 days default)
-│   ├── package.json
-│   └── .env               # Created from .env.example
-├── frontend/
-│   ├── src/
-│   │   ├── PowerMonitoringDashboard.jsx
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── index.css
-│   ├── index.html
-│   ├── vite.config.js
-│   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   ├── package.json
-│   └── .env               # VITE_API_BASE only
-└── .gitignore             # Covers both subprojects
+│   ├── server.js              # MQTT → PostgreSQL → Socket.io + REST + AI
+│   ├── schema.sql             # time-series schema
+│   └── seed.js                # synthetic data generator (no hardware needed)
+└── dashboard/
+    └── src/PowerMonitoringDashboard.jsx
 ```
 
 ---
 
-## Prerequisites
+## Quick start
 
-Install these once on your machine:
-
-| Tool | Version | Purpose |
-|---|---|---|
-| **Node.js** | 18+ (20 LTS recommended) | Runs backend and Vite dev server |
-| **Docker Desktop** | latest | Hosts the PostgreSQL container |
-| **Git** | any | Cloning / version control |
-
-Optional:
-- An ESP32 flashed with a PZEM-004T publisher sketch targeting your HiveMQ Cloud broker
-- A [HiveMQ Cloud](https://www.hivemq.com/mqtt-cloud-broker/) free serverless cluster
-- An [OpenRouter](https://openrouter.ai/) account for AI insights (free)
-
-You do **not** need the ESP32 to try the dashboard — the seed script generates realistic synthetic data.
-
----
-
-## Quick start (five commands)
-
-Clone the repo, then from the project root:
+You **don't need the hardware** to try it: the seed script generates realistic load profiles (overnight base load, morning and evening peaks, fridge cycling, appliance spikes).
 
 ```bash
-# 1. Start PostgreSQL in Docker
-docker run --name pzem-pg -e POSTGRES_PASSWORD=mysecret -e POSTGRES_DB=pzem_db -p 5432:5432 -d postgres:16
+# 1. PostgreSQL
+docker run --name gridpulse-pg -e POSTGRES_PASSWORD=mysecret -e POSTGRES_DB=gridpulse -p 5432:5432 -d postgres:16
+docker exec -i gridpulse-pg psql -U postgres -d gridpulse < backend/schema.sql
 
-# 2. Load the schema
-docker exec -i pzem-pg psql -U postgres -d pzem_db < backend/schema.sql
-
-# 3. Install backend deps, configure, and optionally seed fake data
-cd backend && npm install && cp .env.example .env      # edit .env — see below
-npm run seed:clear                                      # optional: 7 days of synthetic data
-npm run dev                                             # leave this running
-
-# 4. In a second terminal, install and run the frontend
-cd frontend && npm install && echo "VITE_API_BASE=http://localhost:4000" > .env
-npm run dev                                             # opens http://localhost:5173
-```
-
-Open `http://localhost:5173` — you should see the dashboard. If you seeded data in step 3, the chart will populate immediately.
-
----
-
-## Detailed setup
-
-### 1. PostgreSQL (Docker)
-
-Start a local Postgres 16 container. Change `mysecret` if you want a different password — just remember to update `.env` to match:
-
-```bash
-docker run --name pzem-pg \
-    -e POSTGRES_PASSWORD=mysecret \
-    -e POSTGRES_DB=pzem_db \
-    -p 5432:5432 \
-    -d postgres:16
-```
-
-**Container lifecycle:**
-
-```bash
-docker ps                    # check it's running
-docker stop pzem-pg          # pause when you're done
-docker start pzem-pg         # resume (data persists)
-docker rm -f pzem-pg         # delete container AND data — rarely what you want
-```
-
-**Load the schema** (one time, or again any time you want to reset):
-
-```bash
-docker exec -i pzem-pg psql -U postgres -d pzem_db < backend/schema.sql
-```
-
-You should see `CREATE TABLE`, two `CREATE INDEX`, and `ALTER TABLE`. Verify:
-
-```bash
-docker exec -it pzem-pg psql -U postgres -d pzem_db -c "\dt"
-```
-
-You want to see `pzem_telemetry` in the table list.
-
-> **No `psql` on your Windows machine?** That's fine — `docker exec` runs `psql` *inside* the container, so you never need to install the Postgres client on your host OS.
-
-### 2. Backend (Node.js / Express)
-
-```bash
+# 2. Backend
 cd backend
 npm install
-cp .env.example .env
-```
-
-Edit `backend/.env` — at minimum you need Postgres values (already correct if you used `mysecret` above) and your HiveMQ credentials. The AI block is optional:
-
-```ini
-# ---- HTTP ----
-PORT=4000
-CORS_ORIGIN=http://localhost:5173
-
-# ---- PostgreSQL (matches the Docker container) ----
-PGHOST=localhost
-PGPORT=5432
-PGUSER=postgres
-PGPASSWORD=mysecret
-PGDATABASE=pzem_db
-PGSSL=false
-
-# ---- HiveMQ Cloud ----
-MQTT_HOST=your-cluster-id.s1.eu.hivemq.cloud
-MQTT_PORT=8883
-MQTT_USERNAME=your_hivemq_user
-MQTT_PASSWORD=your_hivemq_password
-MQTT_TOPIC=pzem/device01/telemetry
-
-# ---- OpenRouter AI (optional; leave key blank to disable) ----
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
-INSIGHT_INTERVAL_MINUTES=15
-```
-
-**Run the server:**
-
-```bash
-npm run dev     # auto-restart on file changes
-# or
-npm start       # plain node
-```
-
-Expected startup output:
-
-```
-[PG] Connected. Server time: 2026-04-20T...
-[HTTP] Listening on :4000
-[HTTP] CORS origin:  http://localhost:5173
-[MQTT] Connected to mqtts://...
-[MQTT] Subscribed: pzem/device01/telemetry
-[AI] Insights enabled — model=..., interval=15 min.
-```
-
-Health check:
-
-```bash
-curl http://localhost:4000/healthz
-```
-
-### 3. Seed synthetic data (optional but recommended)
-
-Without real hardware, or just to see 24H / 7D views populated, run the seed script from the `backend/` folder:
-
-```bash
-npm run seed:clear       # wipes existing rows for esp32_pzem_01, seeds 7 days
-npm run seed             # adds 7 days of data without clearing
-node seed.js --days=14   # custom: 14 days
-node seed.js --days=30 --clear
-```
-
-Takes ~5 seconds for 7 days (~60,480 rows at 10 s cadence). The generator produces realistic profiles: idle overnight, morning ramp, evening peaks, fridge cycling, occasional appliance spikes, weekend vs weekday differences.
-
-### 4. Frontend (React / Vite)
-
-```bash
-cd frontend
-npm install
-echo "VITE_API_BASE=http://localhost:4000" > .env
+cp .env.example .env        # fill in PG + MQTT values
+npm run seed:clear          # optional: 7 days of synthetic data
 npm run dev
+
+# 3. Dashboard (new terminal)
+cd dashboard
+npm install
+cp .env.example .env
+npm run dev                 # http://localhost:5173
 ```
 
-Vite prints a URL — by default `http://localhost:5173`. Open it.
+### Flashing the device
 
-If the backend is running and the DB has data, you should see:
-- The KPI cards lit up with live or seeded values
-- The chart populated (try the 5M / 1H / 24H / 7D toggle)
-- The event log showing connection and data-load entries
-- The AI Insights panel either showing "AWAITING FIRST ANALYSIS CYCLE" (if you just started) or eventually displaying structured output (~60 s after backend start)
+1. In Arduino IDE, install the **ESP32 board package**, **PubSubClient** and **PZEM004Tv30** libraries.
+2. Copy `firmware/gridpulse-node/secrets.example.h` to `secrets.h` and fill in your WiFi and MQTT credentials.
+3. Flash `gridpulse-node.ino`, then open the Serial Monitor at 115200 baud to watch packets go out.
 
-### 5. Hardware side (ESP32 + PZEM-004T)
-
-The dashboard expects JSON packets published to your `MQTT_TOPIC` every ~10 seconds with this exact shape:
+### Telemetry contract
 
 ```json
 {
-    "device": "esp32_pzem_01",
-    "voltage_V": 236.40,
-    "current_A": 0.145,
-    "power_W": 34.22,
-    "energy_Wh": 128.55,
-    "frequency_Hz": 50.02,
-    "power_factor": 0.98
+  "device": "esp32_pzem_01",
+  "voltage_V": 236.40,
+  "current_A": 0.145,
+  "power_W": 34.22,
+  "energy_Wh": 128.55,
+  "frequency_Hz": 50.02,
+  "power_factor": 0.98
 }
 ```
 
-Wiring notes (TTL version of the PZEM-004T v3):
-- PZEM **TX** → ESP32 RX (typically GPIO 16)
-- PZEM **RX** → ESP32 TX (typically GPIO 17)
-- PZEM **5V** and **GND** from a clean 5V source
-
-Keep jumper wires **short**, twist TX/RX with a ground return, and add a 100 nF decoupling cap near the PZEM's TTL header. For longer runs or noisy environments, use the RS485 version of the PZEM with MAX485 transceivers on each end of a twisted pair.
-
 ---
 
-## AI Insights setup (optional)
-
-1. Sign up at [openrouter.ai](https://openrouter.ai) (free, no billing required).
-2. Create a key at openrouter.ai/keys.
-3. Paste it into `backend/.env` as `OPENROUTER_API_KEY=sk-or-v1-...`
-4. Restart the backend.
-
-The first analysis runs ~60 s after startup, then every `INSIGHT_INTERVAL_MINUTES` (default 15). One API call serves all connected dashboards.
-
-**If you hit rate limits** (the free Llama endpoint is shared globally), swap the model:
-
-```ini
-OPENROUTER_MODEL=deepseek/deepseek-chat-v3.1:free
-# or
-OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free
-```
-
-For production-grade quota, get a free [Groq](https://console.groq.com) API key and add it to OpenRouter under Settings → Integrations — free Llama 3.3 via Groq is ~14,400 requests/day, vs ~200 on the shared pool.
-
----
-
-## Daily workflow
-
-Once everything's installed, a normal session looks like:
-
-```bash
-# Start PG (if stopped)
-docker start pzem-pg
-
-# Terminal 1 — backend
-cd backend && npm run dev
-
-# Terminal 2 — frontend
-cd frontend && npm run dev
-```
-
-Open `http://localhost:5173`.
-
-When you're done:
-
-```bash
-# Ctrl-C both dev servers
-docker stop pzem-pg
-```
-
----
-
-## REST API reference
+## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET`  | `/healthz` | Liveness probe — MQTT & AI status, connected WS clients |
-| `GET`  | `/api/history?range=5M\|1H\|24H\|7D&device=<id>` | Historical samples, downsampled for wide ranges |
-| `GET`  | `/api/insights` | Latest cached AI analysis + config |
-| `POST` | `/api/insights/run` | Force an immediate AI cycle (respects in-flight lock) |
+| `GET`  | `/healthz` | MQTT / AI status, connected clients |
+| `GET`  | `/api/history?range=5M\|1H\|24H\|7D&device=<id>` | Historical samples (downsampled for wide ranges) |
+| `GET`  | `/api/insights` | Latest AI analysis |
+| `POST` | `/api/insights/run` | Trigger an AI analysis now |
 
-**WebSocket events** (Socket.io):
+WebSocket events: `telemetry`, `ai-insight`, `ai-insight-error`.
 
-| Event | Payload |
+---
+
+## Configuration
+
+`backend/.env` (see [`backend/.env.example`](backend/.env.example)):
+
+| Variable | Purpose |
 |---|---|
-| `telemetry` | Newly-persisted packet, enriched with `id`, `timestamp`, `time` |
-| `ai-insight` | Full structured analysis (summary / anomalies / trends / tips) |
-| `ai-insight-error` | `{ error, generatedAt }` when an AI cycle fails |
+| `PGHOST` `PGPORT` `PGUSER` `PGPASSWORD` `PGDATABASE` | PostgreSQL |
+| `MQTT_HOST` `MQTT_PORT` `MQTT_USERNAME` `MQTT_PASSWORD` `MQTT_TOPIC` | Broker |
+| `CORS_ORIGIN` | Dashboard URL |
+| `OPENROUTER_API_KEY` `OPENROUTER_MODEL` `INSIGHT_INTERVAL_MINUTES` | Optional AI insights |
 
 ---
 
-## Troubleshooting
+## Roadmap
 
-**Backend: `[PG] Startup connectivity check FAILED: password authentication failed`**
-Your `PGPASSWORD` in `.env` doesn't match the one you gave Docker. Either fix `.env` or recreate the container with the right password.
-
-**Backend: `[MQTT] Error: Connection refused: Not authorized`**
-HiveMQ credentials wrong, or your HiveMQ cluster is paused. Log into HiveMQ Cloud, check the cluster is running and the credential pair exists.
-
-**Frontend: chart is blank, KPIs show `NaN` or zeros**
-- DB is empty — run `npm run seed:clear` from backend/ to populate synthetic data.
-- Backend not reachable — open DevTools, look for a failed `/api/history` call. Check `VITE_API_BASE` matches the backend's actual port.
-
-**Frontend: `[WS] Connect error: xhr poll error`**
-CORS mismatch. `CORS_ORIGIN` in `backend/.env` must exactly equal the URL Vite prints (usually `http://localhost:5173`). No trailing slash.
-
-**AI panel: `openrouter_http_429: Provider returned error`**
-The free Llama pool is saturated. Swap `OPENROUTER_MODEL` to `deepseek/deepseek-chat-v3.1:free` and restart.
-
-**AI panel stays in "AWAITING FIRST ANALYSIS CYCLE"**
-Either `OPENROUTER_API_KEY` is unset (check the backend startup log for `[AI] Insights disabled`), or the DB has fewer than 3 samples in the last hour. Seed data or wait.
-
-**`docker: command not found`**
-Docker Desktop isn't running or isn't installed. Start it (Windows/Mac) or install it.
-
-**Container exists but won't start: `port is already allocated`**
-Something else is on 5432. Either stop the other Postgres (`net stop postgresql-x64-16` on Windows, or kill the conflicting process) or map a different port: `-p 5433:5432` and update `PGPORT=5433`.
+- [ ] Pin the broker's root CA on the ESP32 instead of `setInsecure()`
+- [ ] OTA firmware updates
+- [ ] Support for multiple devices in the dashboard
+- [ ] Docker Compose for the full stack
+- [ ] Three-phase metering (3× PZEM on Modbus addresses)
 
 ---
 
-## Scripts reference
+## License
 
-**Backend (`backend/package.json`):**
-
-```bash
-npm run dev           # node --watch server.js
-npm start             # node server.js
-npm run seed          # seed 7 days, keep existing
-npm run seed:clear    # wipe + seed 7 days
-```
-
-**Frontend (`frontend/package.json`):**
-
-```bash
-npm run dev           # Vite dev server with HMR
-npm run build         # production build → dist/
-npm run preview       # serve the built bundle locally
-npm run lint          # ESLint
-```
-
----
-
-## Security checklist before pushing to GitHub
-
-- [ ] `.env` files are in `.gitignore` (already handled at repo root)
-- [ ] HiveMQ credentials aren't committed in any file
-- [ ] OpenRouter API key isn't committed
-- [ ] Postgres password is rotated if you ever pushed a test commit with it
-
-Run `git status` before your first commit and confirm no `.env` files appear.
-
----
-
-## Stack credits
-
-- **React 19 + Vite 8** — frontend framework and build tool
-- **Tailwind CSS 3** — utility-first styling
-- **Recharts** — time-series chart
-- **Lucide** — icons
-- **Socket.io** — realtime WebSocket transport
-- **mqtt.js** — MQTT client with TLS
-- **Express + pg** — backend HTTP and Postgres driver
-- **PostgreSQL 16** — time-series storage with BRIN indexing
-- **OpenRouter** — LLM gateway for AI insights
-
----
+MIT. See [LICENSE](LICENSE).

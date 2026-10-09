@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  PZEM Telemetry Backend
+ *  GridPulse Ingestion Backend
  *  ---------------------------------------------------------------------------
  *  Pipeline:
  *      HiveMQ Cloud (MQTT/TLS:8883)
@@ -263,7 +263,7 @@ const AI_INTERVAL_MINUTES = Math.max(
 const AI_INTERVAL_MS = AI_INTERVAL_MINUTES * 60 * 1000;
 const AI_DEVICE = process.env.INSIGHT_DEVICE || "esp32_pzem_01";
 const AI_APP_URL = process.env.INSIGHT_APP_URL || "http://localhost:4000";
-const AI_APP_TITLE = process.env.INSIGHT_APP_TITLE || "PZEM Telemetry Console";
+const AI_APP_TITLE = process.env.INSIGHT_APP_TITLE || "GridPulse";
 const AI_TIMEOUT_MS = 30_000;
 const AI_MIN_SAMPLES = 3; // need at least this many rows in the last hour
 
@@ -550,7 +550,7 @@ const mqttUrl = `mqtts://${process.env.MQTT_HOST}:${process.env.MQTT_PORT || 888
 const mqttClient = mqtt.connect(mqttUrl, {
     username: process.env.MQTT_USERNAME,
     password: process.env.MQTT_PASSWORD,
-    clientId: `pzem-backend-${Math.random().toString(16).slice(2, 10)}`,
+    clientId: `gridpulse-backend-${Math.random().toString(16).slice(2, 10)}`,
     protocolVersion: 5,
     clean: true,
     reconnectPeriod: 3_000,     // retry every 3 s after disconnect
